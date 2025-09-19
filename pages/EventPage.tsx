@@ -1,7 +1,6 @@
 import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { EventData, Participant, EventTimeSlot } from '../types';
-import { decodeEventData, encodeEventData } from '../services/urlService';
 import UsernameModal from '../components/UsernameModal';
 import TimeTable from '../components/TimeTable';
 import ParticipantsList from '../components/ParticipantsList';
@@ -10,7 +9,7 @@ import { CheckCircleIcon } from '../components/icons/CheckCircleIcon';
 const SEVEN_DAYS_IN_MS = 7 * 24 * 60 * 60 * 1000;
 
 const EventPage: React.FC = () => {
-  const { data } = useParams<{ data: string }>();
+  const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
   
   const [eventData, setEventData] = useState<EventData | null>(null);
@@ -19,23 +18,53 @@ const EventPage: React.FC = () => {
   const [usernameError, setUsernameError] = useState<string | null>(null);
   const [isExpired, setIsExpired] = useState(false);
 
+  const API_BASE_URL = 'https://time-coordinator-api.jerry92033119.workers.dev';
+
+  // 主要的資料獲取和輪詢邏輯
   useEffect(() => {
-    if (!data) {
-      setError("No event data provided.");
-      return;
-    }
-    try {
-      const decodedData = decodeEventData(data);
-      if (Date.now() - decodedData.createdAt > SEVEN_DAYS_IN_MS) {
-        setIsExpired(true);
-      } else {
-        setEventData(decodedData);
+      if (!id) {
+        setError("No event ID provided.");
+        return;
       }
-    } catch (e) {
-      setError("Failed to load event data. The link might be corrupted.");
-      console.error(e);
-    }
-  }, [data]);
+
+      let isActive = true; // 防止在元件卸載後還在更新狀態
+
+      const fetchEvent = async () => {
+          try {
+              const response = await fetch(`${API_BASE_URL}/events/${id}`);
+              if (!response.ok) {
+                  if(response.status === 404) throw new Error("Event not found. The link might be incorrect or the event has expired.");
+                  throw new Error("Failed to load event data.");
+              }
+              const data = await response.json();
+              
+              if (isActive) {
+                  // 這裡可以保留或移除過期邏輯,或者由後端處理
+                  if (Date.now() - data.createdAt > SEVEN_DAYS_IN_MS) {
+                      setIsExpired(true);
+                  } else {
+                      setEventData(data);
+                  }
+              }
+          } catch (e: any) {
+              if (isActive) {
+                  setError(e.message);
+                  console.error(e);
+              }
+          }
+      };
+      
+      fetchEvent(); // 立即獲取一次
+
+      // 設定每 3 秒輪詢一次
+      const intervalId = setInterval(fetchEvent, 3000);
+
+      // 清理函數
+      return () => {
+          isActive = false;
+          clearInterval(intervalId);
+      };
+  }, [id]);
 
   const participants = useMemo<Participant[]>(() => {
     if (!eventData) return [];
@@ -55,9 +84,25 @@ const EventPage: React.FC = () => {
     })).sort((a,b) => a.name.localeCompare(b.name));
   }, [eventData]);
 
-  const updateEventData = (newEventData: EventData) => {
+  const updateEventData = async (newEventData: EventData) => {
+    // 樂觀更新 UI,讓體驗更流暢
     setEventData(newEventData);
-    navigate(`/event/${encodeEventData(newEventData)}`, { replace: true });
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newEventData),
+        });
+
+        if (!response.ok) {
+            // 如果更新失敗,可以考慮將 UI 回滾到之前的狀態
+            console.error("Failed to save event data.");
+            // 可以在這裡觸發一個錯誤提示
+        }
+    } catch (error) {
+        console.error("Error updating event:", error);
+    }
   };
 
   const handleUsernameSubmit = (name: string) => {

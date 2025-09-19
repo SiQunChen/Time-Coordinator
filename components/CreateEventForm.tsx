@@ -32,7 +32,7 @@ const CreateEventForm: React.FC = () => {
     });
   }
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!eventName.trim() || !creator.trim()) {
       alert('Please fill in both the event name and your name.');
@@ -43,7 +43,7 @@ const CreateEventForm: React.FC = () => {
       alert('Please select at least one date for the event.');
       return;
     }
-    
+
     sessionStorage.setItem('username', creator.trim());
 
     const timeSlots: EventTimeSlot[] = [];
@@ -69,9 +69,8 @@ const CreateEventForm: React.FC = () => {
             }
         }
     }
-    
-    const newEvent: EventData = {
-      id: crypto.randomUUID(),
+
+    const newEvent: Omit<EventData, 'id'> = { // 我們不再在客戶端生成 ID
       eventName: eventName.trim(),
       creator: creator.trim(),
       createdAt: Date.now(),
@@ -80,8 +79,25 @@ const CreateEventForm: React.FC = () => {
       eventType: scheduleType,
     };
 
-    const encodedData = encodeEventData(newEvent);
-    navigate(`/event/${encodedData}`);
+    try {
+      const response = await fetch('https://time-coordinator-api.jerry92033119.workers.dev/events', {
+        method: 'POST',
+        headers: {
+          'Content-Type': 'application/json',
+        },
+        body: JSON.stringify(newEvent),
+      });
+
+      if (!response.ok) {
+        throw new Error('Failed to create event');
+      }
+
+      const { id } = await response.json(); // 從後端取得新的短 ID
+      navigate(`/event/${id}`); // 導覽到 /event/abcdef
+    } catch (error) {
+      console.error('Error creating event:', error);
+      alert('Could not create the event. Please try again.');
+    }
   };
   
   const renderCalendar = () => {

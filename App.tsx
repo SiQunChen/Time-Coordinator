@@ -1,18 +1,18 @@
 
 import React from 'react';
-import { HashRouter, Routes, Route, Navigate } from 'react-router-dom';
+import { BrowserRouter, Routes, Route, Navigate } from 'react-router-dom'; 
 import HomePage from './pages/HomePage';
 import EventPage from './pages/EventPage';
 
 function App() {
   return (
-    <HashRouter>
+    <BrowserRouter>
       <Routes>
         <Route path="/" element={<HomePage />} />
-        <Route path="/event/:data" element={<EventPage />} />
+        <Route path="/event/:id" element={<EventPage />} /> 
         <Route path="*" element={<Navigate to="/" />} />
       </Routes>
-    </HashRouter>
+    </BrowserRouter> 
   );
 }
 
