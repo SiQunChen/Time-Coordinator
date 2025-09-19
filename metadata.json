@@ -1,0 +1,5 @@
+{
+  "name": "Quick-Time Coordinator",
+  "description": "A simple, intuitive web tool that allows users to quickly find a convenient time for everyone in a group. Create an event, share the link, and let participants mark their availability on a shared timetable.",
+  "requestFramePermissions": []
+}
