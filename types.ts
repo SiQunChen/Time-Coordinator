@@ -16,7 +16,7 @@ export interface EventData {
   creator: string;
   createdAt: number; // Unix timestamp
   timeSlots: EventTimeSlot[];
-  finalizedTime: string | null;
+  finalizedTime: string[] | null; 
   eventType: EventType;
 }
 

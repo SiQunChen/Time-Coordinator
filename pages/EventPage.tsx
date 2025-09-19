@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react'; 
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { EventData, Participant, EventTimeSlot } from '../types';
 import UsernameModal from '../components/UsernameModal';
@@ -11,6 +11,7 @@ const SEVEN_DAYS_IN_MS = 7 * 24 * 60 * 60 * 1000;
 const EventPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
   const [eventData, setEventData] = useState<EventData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,16 +54,25 @@ const EventPage: React.FC = () => {
               }
           }
       };
-      
-      fetchEvent(); // 立即獲取一次
 
-      // 設定每 3 秒輪詢一次
-      const intervalId = setInterval(fetchEvent, 3000);
+      const startPolling = () => {
+        // 先執行一次，然後設定計時器
+        fetchEvent(); 
+        pollingIntervalRef.current = setInterval(fetchEvent, 3000);
+      };
+
+      const stopPolling = () => {
+          if (pollingIntervalRef.current) {
+              clearInterval(pollingIntervalRef.current);
+          }
+      };
+      
+      startPolling();
 
       // 清理函數
       return () => {
           isActive = false;
-          clearInterval(intervalId);
+          stopPolling();
       };
   }, [id]);
 
@@ -85,23 +95,40 @@ const EventPage: React.FC = () => {
   }, [eventData]);
 
   const updateEventData = async (newEventData: EventData) => {
+    // 停止輪詢，防止狀態衝突
+    if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+    }
+
     // 樂觀更新 UI,讓體驗更流暢
     setEventData(newEventData);
 
     try {
-        const response = await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
+        await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(newEventData),
         });
+        
+        // 更新成功後，立即從伺服器獲取最新狀態
+        const response = await fetch(`${API_BASE_URL}/events/${newEventData.id}`);
+        const data = await response.json();
+        setEventData(data);
 
-        if (!response.ok) {
-            // 如果更新失敗,可以考慮將 UI 回滾到之前的狀態
-            console.error("Failed to save event data.");
-            // 可以在這裡觸發一個錯誤提示
-        }
     } catch (error) {
-        console.error("Error updating event:", error);
+        console.error("更新事件時發生錯誤:", error);
+        // 可以在此處加入錯誤提示
+    } finally {
+        // 無論成功或失敗，都重新啟動輪詢
+        pollingIntervalRef.current = setInterval(async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/events/${id}`);
+                const data = await response.json();
+                setEventData(data);
+            } catch (e) {
+                console.error("輪詢時發生錯誤:", e);
+            }
+        }, 3000);
     }
   };
 
@@ -156,7 +183,8 @@ const EventPage: React.FC = () => {
     const bestTimes = getBestTimeSlots();
     if(bestTimes.length > 0) {
         // Just pick the first best time if multiple exist
-        updateEventData({ ...eventData, finalizedTime: bestTimes[0].time });
+        const bestTimeStrings = bestTimes.map(slot => slot.time);
+        updateEventData({ ...eventData, finalizedTime: bestTimeStrings });
     } else {
         alert("Cannot finalize: no one has marked their availability for any slot.");
     }
@@ -211,17 +239,26 @@ const EventPage: React.FC = () => {
     return <UsernameModal onSubmit={handleUsernameSubmit} error={usernameError} onClearError={() => setUsernameError(null)} />;
   }
 
-  if (eventData.finalizedTime) {
+  if (eventData.finalizedTime && eventData.finalizedTime.length > 0) {
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         <div className="w-full max-w-2xl mx-auto text-center bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700">
            <CheckCircleIcon className="h-16 w-16 text-green-500 mx-auto mb-4" />
-          <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100 mb-2">Event Time Confirmed!</h1>
-          <p className="text-lg text-slate-600 dark:text-slate-300 mb-4">The event <span className="font-semibold text-blue-500">{eventData.eventName}</span> is scheduled for:</p>
-          <div className="bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-200 text-2xl font-semibold p-4 rounded-lg">
-            {formatFinalizedTime(eventData.finalizedTime, eventData.eventType)}
+          <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100 mb-2">活動時間已確認！</h1>
+          <p className="text-lg text-slate-600 dark:text-slate-300 mb-4">
+            活動 <span className="font-semibold text-blue-500">{eventData.eventName}</span> 的最佳時間選項如下：
+          </p>
+          {/* **修改這裡：使用 ul 和 map 來顯示所有時間** */}
+          <div className="bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-200 text-xl font-semibold p-4 rounded-lg">
+            <ul className="space-y-2">
+              {eventData.finalizedTime.map(time => (
+                <li key={time}>
+                  {formatFinalizedTime(time, eventData.eventType)}
+                </li>
+              ))}
+            </ul>
           </div>
-          <Link to="/" className="mt-8 inline-block px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors">Create another event</Link>
+          <Link to="/" className="mt-8 inline-block px-6 py-2 bg-blue-500 text-white rounded-lg hover:bg-blue-600 transition-colors">建立另一個活動</Link>
         </div>
       </div>
     );
