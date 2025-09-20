@@ -118,7 +118,10 @@ const CreateEventForm: React.FC = () => {
 
     for (let day = 1; day <= daysInMonth; day++) {
         const date = new Date(year, month, day);
-        const dateStr = date.toISOString().split('T')[0];
+        const y = date.getFullYear();
+        const m = String(date.getMonth() + 1).padStart(2, '0'); // 月份是從 0 開始，所以要 +1
+        const d = String(date.getDate()).padStart(2, '0');
+        const dateStr = `${y}-${m}-${d}`;
         const isSelected = selectedDates.includes(dateStr);
         const isPast = date < today;
 
