@@ -151,7 +151,7 @@ const CreateEventForm: React.FC = () => {
           <button type="button" onClick={() => changeMonth(1)} className="font-bold px-3 py-1 rounded-md hover:bg-slate-200 dark:hover:bg-slate-600">&gt;</button>
         </div>
         <div className="grid grid-cols-7 gap-y-2 text-sm text-center text-slate-500 dark:text-slate-400">
-            <div>Su</div><div>Mo</div><div>Tu</div><div>We</div><div>Th</div><div>Fr</div><div>Sa</div>
+            <div>Sun</div><div>Mon</div><div>Tue</div><div>Wed</div><div>Thu</div><div>Fri</div><div>Sat</div>
         </div>
         <div className="grid grid-cols-7 gap-y-2 mt-2">
             {dayElements}
