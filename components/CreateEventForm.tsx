@@ -44,7 +44,8 @@ const CreateEventForm: React.FC = () => {
       return;
     }
 
-    sessionStorage.setItem('username', creator.trim());
+    // 將 sessionStorage 改為 localStorage
+    localStorage.setItem('username', creator.trim());
 
     const timeSlots: EventTimeSlot[] = [];
     if (scheduleType === 'date-based') {

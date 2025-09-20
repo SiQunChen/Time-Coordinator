@@ -16,7 +16,7 @@ const EventPage: React.FC = () => {
 
   const [eventData, setEventData] = useState<EventData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [username, setUsername] = useState<string | null>(() => sessionStorage.getItem('username'));
+  const [username, setUsername] = useState<string | null>(() => localStorage.getItem('username'));
   const [usernameError, setUsernameError] = useState<string | null>(null);
   const [isExpired, setIsExpired] = useState(false);
 
@@ -143,7 +143,8 @@ const EventPage: React.FC = () => {
         return;
     }
     setUsername(name);
-    sessionStorage.setItem('username', name);
+    // 將 sessionStorage 改為 localStorage
+    localStorage.setItem('username', name);
     setUsernameError(null);
   };
 
