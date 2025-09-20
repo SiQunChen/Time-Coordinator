@@ -8,17 +8,6 @@ import { CheckCircleIcon } from '../components/icons/CheckCircleIcon';
 
 const SEVEN_DAYS_IN_MS = 7 * 24 * 60 * 60 * 1000;
 
-const storage = {
-  getToken: (eventId: string): { username: string; token: string } | null => {
-    const data = localStorage.getItem(`time_coordinator_${eventId}`);
-    return data ? JSON.parse(data) : null;
-  },
-  setToken: (eventId: string, username: string, token: string) => {
-    const data = JSON.stringify({ username, token });
-    localStorage.setItem(`time_coordinator_${eventId}`, data);
-  },
-};
-
 const EventPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
@@ -27,8 +16,7 @@ const EventPage: React.FC = () => {
 
   const [eventData, setEventData] = useState<EventData | null>(null);
   const [error, setError] = useState<string | null>(null);
-  const [username, setUsername] = useState<string | null>(null);
-  const [userToken, setUserToken] = useState<string | null>(null);
+  const [username, setUsername] = useState<string | null>(() => sessionStorage.getItem('username'));
   const [usernameError, setUsernameError] = useState<string | null>(null);
   const [isExpired, setIsExpired] = useState(false);
 
@@ -104,7 +92,7 @@ const EventPage: React.FC = () => {
 
   // 【程式碼修改 1/3】: 這是最核心的修改。pushUpdatesToServer 現在會先拉取再合併。
   const pushUpdatesToServer = async (localEventData: EventData) => {
-    if (!id || !username || !userToken) return;
+    if (!id || !username) return;
 
     try {
       // 步驟 1: 在寫入前，先從伺服器獲取最新的資料
@@ -136,12 +124,8 @@ const EventPage: React.FC = () => {
       // 步驟 3: 將合併後的完美資料發送到伺服器
       await fetch(`${API_BASE_URL}/events/${id}`, {
         method: 'PUT',
-        headers: { 
-          'Content-Type': 'application/json',
-          // 使用 Bearer Token 格式來傳遞權杖
-          'Authorization': `Bearer ${userToken}`
-        },
-        body: JSON.stringify(dataToSend), // dataToSend 應只包含需要更新的部分
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dataToSend),
       });
 
     } catch (error) {
@@ -152,51 +136,15 @@ const EventPage: React.FC = () => {
     }
   };
 
-  // 在組件掛載時，檢查 localStorage
-  useEffect(() => {
-    if (id) {
-      const savedUser = storage.getToken(id);
-      if (savedUser) {
-        setUsername(savedUser.username);
-        setUserToken(savedUser.token);
-      }
-      startPolling();
+  const handleUsernameSubmit = (name: string) => {
+    const isNameTaken = participants.some(p => p.name.toLowerCase() === name.toLowerCase());
+    if(isNameTaken) {
+        setUsernameError("This name is already taken. Please choose another one.");
+        return;
     }
-    // ... (清理邏輯)
-  }, [id]);
-
-  // 修改 handleUsernameSubmit
-  const handleUsernameSubmit = async (name: string) => {
-    if (!id) return { success: false, error: "Event ID is missing" };
-
-    try {
-        // 假設後端有一個專門用來加入活動的 endpoint
-        const response = await fetch(`${API_BASE_URL}/events/${id}/join`, {
-            method: 'POST',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify({ username: name }),
-        });
-
-        const result = await response.json();
-
-        if (!response.ok) {
-            setUsernameError(result.error || "This name is already taken.");
-            return { success: false, error: result.error };
-        }
-
-        // 成功加入，儲存權杖
-        const { token } = result;
-        storage.setToken(id, name, token);
-        setUsername(name);
-        setUserToken(token);
-        setUsernameError(null);
-        fetchEvent(); // 立即刷新一次資料
-        return { success: true, token };
-
-    } catch (err) {
-        setUsernameError("An unexpected error occurred.");
-        return { success: false, error: "An unexpected error occurred." };
-    }
+    setUsername(name);
+    sessionStorage.setItem('username', name);
+    setUsernameError(null);
   };
 
   // 【程式碼修改 2/3】: handleSlotToggle 邏輯不變，但它傳遞的 localEventData 會被 pushUpdatesToServer 聰明地使用
@@ -330,8 +278,7 @@ const EventPage: React.FC = () => {
     return <div className="min-h-screen flex items-center justify-center"><p>Loading event...</p></div>;
   }
 
-  // 只有當 localStorage 中沒有權杖時，才顯示 UsernameModal
-  if (!userToken) {
+  if (!username) {
     return <UsernameModal onSubmit={handleUsernameSubmit} error={usernameError} onClearError={() => setUsernameError(null)} />;
   }
 
