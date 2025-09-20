@@ -14,13 +14,20 @@ export interface EventData {
   id: string;
   eventName: string;
   creator: string;
-  createdAt: number; // Unix timestamp
+  createdAt: number; 
   timeSlots: EventTimeSlot[];
   finalizedTime: string[] | null; 
   eventType: EventType;
+  participants: ParticipantRecord[]; // 新增：用來儲存所有參與者及其權杖
 }
 
 export interface Participant {
   name: string;
-  hasVoted: boolean;
+  // 我們不再直接儲存 hasVoted
+}
+
+// 新增一個後端用來儲存參與者完整資訊的類型
+export interface ParticipantRecord {
+  name: string;
+  token: string; // 秘密權杖
 }
