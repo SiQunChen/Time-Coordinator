@@ -157,7 +157,7 @@ const EventPage: React.FC = () => {
     // 直到使用者停止操作 500 毫秒，才會真的把最新的狀態發送到伺服器。
     debounceTimeoutRef.current = setTimeout(() => {
       pushUpdatesToServer(updatedEventData);
-    }, 500); // 500ms 的延遲是一個比較舒適的體驗
+    }, 3000); // 3000ms 的延遲是一個比較舒適的體驗
   };
   
   const getBestTimeSlots = (): EventTimeSlot[] => {
