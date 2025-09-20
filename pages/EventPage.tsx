@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react'; 
+import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { EventData, Participant, EventTimeSlot } from '../types';
 import UsernameModal from '../components/UsernameModal';
@@ -11,7 +11,6 @@ const SEVEN_DAYS_IN_MS = 7 * 24 * 60 * 60 * 1000;
 const EventPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
-  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
   const [eventData, setEventData] = useState<EventData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -19,62 +18,55 @@ const EventPage: React.FC = () => {
   const [usernameError, setUsernameError] = useState<string | null>(null);
   const [isExpired, setIsExpired] = useState(false);
 
+  // **新增**：使用 useRef 來保存計時器 ID，避免 re-render 導致計時器遺失
+  const inactivityTimerRef = useRef<NodeJS.Timeout | null>(null);
+  const debounceSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  
   const API_BASE_URL = 'https://time-coordinator-api.jerry92033119.workers.dev';
 
-  // 主要的資料獲取和輪詢邏輯
-  useEffect(() => {
-      if (!id) {
-        setError("No event ID provided.");
-        return;
+  // 從伺服器獲取最新事件資料的函數
+  const fetchEventData = useCallback(async () => {
+    if (!id) return;
+    try {
+      const response = await fetch(`${API_BASE_URL}/events/${id}`);
+      if (!response.ok) {
+        throw new Error("無法獲取事件資料");
       }
-
-      let isActive = true; // 防止在元件卸載後還在更新狀態
-
-      const fetchEvent = async () => {
-          try {
-              const response = await fetch(`${API_BASE_URL}/events/${id}`);
-              if (!response.ok) {
-                  if(response.status === 404) throw new Error("Event not found. The link might be incorrect or the event has expired.");
-                  throw new Error("Failed to load event data.");
-              }
-              const data = await response.json();
-              
-              if (isActive) {
-                  // 這裡可以保留或移除過期邏輯,或者由後端處理
-                  if (Date.now() - data.createdAt > SEVEN_DAYS_IN_MS) {
-                      setIsExpired(true);
-                  } else {
-                      setEventData(data);
-                  }
-              }
-          } catch (e: any) {
-              if (isActive) {
-                  setError(e.message);
-                  console.error(e);
-              }
-          }
-      };
-
-      const startPolling = () => {
-        // 先執行一次，然後設定計時器
-        fetchEvent(); 
-        pollingIntervalRef.current = setInterval(fetchEvent, 3000);
-      };
-
-      const stopPolling = () => {
-          if (pollingIntervalRef.current) {
-              clearInterval(pollingIntervalRef.current);
-          }
-      };
-      
-      startPolling();
-
-      // 清理函數
-      return () => {
-          isActive = false;
-          stopPolling();
-      };
+      const data = await response.json();
+      setEventData(data);
+    } catch (e) {
+      console.error("獲取資料失敗:", e);
+    }
   }, [id]);
+
+  // 重置閒置刷新計時器的函數
+  const resetInactivityTimer = useCallback(() => {
+    // 先清除舊的計時器
+    if (inactivityTimerRef.current) {
+      clearTimeout(inactivityTimerRef.current);
+    }
+    // 設定一個新的 3 秒計時器，時間到就自動刷新
+    inactivityTimerRef.current = setTimeout(() => {
+      fetchEventData();
+    }, 3000);
+  }, [fetchEventData]);
+
+  // 元件載入時的初始資料獲取和計時器設定
+  useEffect(() => {
+    if (!id) {
+      setError("沒有提供事件 ID。");
+      return;
+    }
+    fetchEventData();
+    resetInactivityTimer();
+
+    // 元件卸載時清除所有計時器
+    return () => {
+      if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+      if (debounceSaveTimerRef.current) clearTimeout(debounceSaveTimerRef.current);
+    };
+  }, [id, fetchEventData, resetInactivityTimer]);
+
 
   const participants = useMemo<Participant[]>(() => {
     if (!eventData) return [];
@@ -94,58 +86,14 @@ const EventPage: React.FC = () => {
     })).sort((a,b) => a.name.localeCompare(b.name));
   }, [eventData]);
 
-  const updateEventData = async (newEventData: EventData) => {
-    // 停止輪詢，防止狀態衝突
-    if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-    }
-
-    // 樂觀更新 UI,讓體驗更流暢
-    setEventData(newEventData);
-
-    try {
-        await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(newEventData),
-        });
-        
-        // 更新成功後，立即從伺服器獲取最新狀態
-        const response = await fetch(`${API_BASE_URL}/events/${newEventData.id}`);
-        const data = await response.json();
-        setEventData(data);
-
-    } catch (error) {
-        console.error("更新事件時發生錯誤:", error);
-        // 可以在此處加入錯誤提示
-    } finally {
-        // 無論成功或失敗，都重新啟動輪詢
-        pollingIntervalRef.current = setInterval(async () => {
-            try {
-                const response = await fetch(`${API_BASE_URL}/events/${id}`);
-                const data = await response.json();
-                setEventData(data);
-            } catch (e) {
-                console.error("輪詢時發生錯誤:", e);
-            }
-        }, 3000);
-    }
-  };
-
-  const handleUsernameSubmit = (name: string) => {
-    const isNameTaken = participants.some(p => p.name.toLowerCase() === name.toLowerCase());
-    if(isNameTaken) {
-        setUsernameError("This name is already taken. Please choose another one.");
-        return;
-    }
-    setUsername(name);
-    sessionStorage.setItem('username', name);
-    setUsernameError(null);
-  };
-
+  // **修改**：這是使用者操作的核心函數
   const handleSlotToggle = (time: string, select: boolean) => {
-    if (!eventData || !username || eventData.finalizedTime) return;
+    if (!eventData || !username || (eventData.finalizedTime && eventData.finalizedTime.length > 0)) return;
 
+    // 1. **重置閒置計時器**：因為使用者有新動作
+    resetInactivityTimer();
+
+    // 2. **樂觀更新 UI**：讓使用者感覺操作立即生效
     const newTimeSlots = eventData.timeSlots.map(slot => {
       if (slot.time === time) {
         const newParticipants = { ...slot.participants };
@@ -158,10 +106,45 @@ const EventPage: React.FC = () => {
       }
       return slot;
     });
+    
+    const updatedEventData = { ...eventData, timeSlots: newTimeSlots };
+    setEventData(updatedEventData);
 
-    updateEventData({ ...eventData, timeSlots: newTimeSlots });
+    // 3. **設定儲存防抖**
+    // 清除上一個未執行的儲存計時器
+    if (debounceSaveTimerRef.current) {
+      clearTimeout(debounceSaveTimerRef.current);
+    }
+
+    // 設定一個 1 秒後的儲存操作
+    debounceSaveTimerRef.current = setTimeout(async () => {
+      try {
+        await fetch(`${API_BASE_URL}/events/${updatedEventData.id}`, {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(updatedEventData),
+        });
+      } catch (error) {
+        console.error("儲存事件資料失敗:", error);
+        // 可以在此處加入錯誤提示，或將 UI 狀態還原
+      }
+    }, 1000); // 1秒延遲
   };
   
+  // 這個函數現在只用來處理確認事件，不再需要管理輪詢
+  const updateEventDataOnFinalize = async (newEventData: EventData) => {
+    // 立即儲存最終結果，不需要防抖
+    if (debounceSaveTimerRef.current) clearTimeout(debounceSaveTimerRef.current);
+    if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+
+    setEventData(newEventData);
+    await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(newEventData),
+    });
+  };
+
   const getBestTimeSlots = (): EventTimeSlot[] => {
       if (!eventData || eventData.timeSlots.length === 0) return [];
       
@@ -182,12 +165,22 @@ const EventPage: React.FC = () => {
     if (!eventData || eventData.creator !== username) return;
     const bestTimes = getBestTimeSlots();
     if(bestTimes.length > 0) {
-        // Just pick the first best time if multiple exist
         const bestTimeStrings = bestTimes.map(slot => slot.time);
-        updateEventData({ ...eventData, finalizedTime: bestTimeStrings });
+        updateEventDataOnFinalize({ ...eventData, finalizedTime: bestTimeStrings });
     } else {
-        alert("Cannot finalize: no one has marked their availability for any slot.");
+        alert("無法確認：沒有人標示任何可用的時間。");
     }
+  };
+
+  const handleUsernameSubmit = (name: string) => {
+    const isNameTaken = participants.some(p => p.name.toLowerCase() === name.toLowerCase());
+    if(isNameTaken) {
+        setUsernameError("這個名稱已經被使用，請選擇其他名稱。");
+        return;
+    }
+    setUsername(name);
+    sessionStorage.setItem('username', name);
+    setUsernameError(null);
   };
 
   const formatDisplayTime = (time: string, eventType: 'date-based' | 'weekly'): string => {
@@ -197,17 +190,17 @@ const EventPage: React.FC = () => {
     const [dayIndex, hour] = time.split('-').map(Number);
     const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
     const timeString = new Date(`1970-01-01T${String(hour).padStart(2, '0')}:00:00`).toLocaleTimeString([], { timeStyle: 'short' });
-    return `Every ${days[dayIndex]} at ${timeString}`;
+    return `每週 ${days[dayIndex]} ${timeString}`;
   }
   
-    const formatFinalizedTime = (time: string, eventType: 'date-based' | 'weekly'): string => {
+  const formatFinalizedTime = (time: string, eventType: 'date-based' | 'weekly'): string => {
     if (eventType === 'date-based') {
       return new Date(time).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' });
     }
     const [dayIndex, hour] = time.split('-').map(Number);
     const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
     const timeString = new Date(`1970-01-01T${String(hour).padStart(2, '0')}:00:00`).toLocaleTimeString([], { timeStyle: 'short' });
-    return `Every ${days[dayIndex]} at ${timeString}`;
+    return `每週 ${days[dayIndex]} ${timeString}`;
   }
 
 
@@ -245,14 +238,11 @@ const EventPage: React.FC = () => {
         <div className="w-full max-w-2xl mx-auto text-center bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700">
            <CheckCircleIcon className="h-16 w-16 text-green-500 mx-auto mb-4" />
           <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100 mb-2">活動時間已確認！</h1>
-          <p className="text-lg text-slate-600 dark:text-slate-300 mb-4">
-            活動 <span className="font-semibold text-blue-500">{eventData.eventName}</span> 的最佳時間選項如下：
-          </p>
-          {/* **修改這裡：使用 ul 和 map 來顯示所有時間** */}
+          <p className="text-lg text-slate-600 dark:text-slate-300 mb-4">活動 <span className="font-semibold text-blue-500">{eventData.eventName}</span> 的最佳時間選項如下：</p>
           <div className="bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-200 text-xl font-semibold p-4 rounded-lg">
-            <ul className="space-y-2">
+            <ul className="space-y-2 text-left">
               {eventData.finalizedTime.map(time => (
-                <li key={time}>
+                <li key={time} className="pl-2">
                   {formatFinalizedTime(time, eventData.eventType)}
                 </li>
               ))}
@@ -270,17 +260,17 @@ const EventPage: React.FC = () => {
     <div className="container mx-auto p-4 md:p-8">
       <header className="mb-8">
         <h1 className="text-4xl font-bold tracking-tight">{eventData.eventName}</h1>
-        <p className="text-slate-500 dark:text-slate-400">Created by: {eventData.creator}</p>
-        <p className="text-slate-500 dark:text-slate-400">You are signed in as: <span className="font-bold text-blue-500">{username}</span></p>
+        <p className="text-slate-500 dark:text-slate-400">建立者: {eventData.creator}</p>
+        <p className="text-slate-500 dark:text-slate-400">您目前登入的身分是: <span className="font-bold text-blue-500">{username}</span></p>
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-2">
             <TimeTable
                 timeSlots={eventData.timeSlots}
-                onSlotToggle={handleSlotToggle}
+                onSlotToggle={handleSlotToggle} // **傳遞新的 handleSlotToggle**
                 currentUser={username}
-                finalized={!!eventData.finalizedTime}
+                finalized={!!(eventData.finalizedTime && eventData.finalizedTime.length > 0)}
                 maxParticipants={participants.length}
                 bestSlots={bestSlots.map(s => s.time)}
                 eventType={eventData.eventType}
