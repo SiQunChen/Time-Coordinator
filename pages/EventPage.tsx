@@ -59,7 +59,7 @@ const EventPage: React.FC = () => {
   const startPolling = () => {
       stopPolling(); 
       fetchEvent(); 
-      pollingIntervalRef.current = setInterval(fetchEvent, 1000);
+      pollingIntervalRef.current = setInterval(fetchEvent, 5000);
   };
 
 
