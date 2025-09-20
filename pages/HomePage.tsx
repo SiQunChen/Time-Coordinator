@@ -20,7 +20,7 @@ const HomePage: React.FC = () => {
           <CreateEventForm />
         </div>
         <footer className="mt-12 text-sm text-slate-500 dark:text-slate-400">
-          <p>&copy; {new Date().getFullYear()} Time Coordinator. Making scheduling simple.</p>
+          <p>&copy; {new Date().getFullYear()} Time Coordinator. | Developed by SQ.</p>
         </footer>
       </div>
     </div>
