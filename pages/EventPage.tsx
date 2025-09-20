@@ -18,13 +18,13 @@ const EventPage: React.FC = () => {
   const [usernameError, setUsernameError] = useState<string | null>(null);
   const [isExpired, setIsExpired] = useState(false);
 
-  // **新增**：使用 useRef 來保存計時器 ID，避免 re-render 導致計時器遺失
-  const inactivityTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // **修改**: 將原本的 inactivityTimerRef 改為 pollingTimerRef，語意更清晰
+  const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const debounceSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
   
   const API_BASE_URL = 'https://time-coordinator-api.jerry92033119.workers.dev';
 
-  // 從伺服器獲取最新事件資料的函數
+  // 從伺服器獲取最新事件資料的函數 (此函數本身不變)
   const fetchEventData = useCallback(async () => {
     if (!id) return;
     try {
@@ -39,33 +39,28 @@ const EventPage: React.FC = () => {
     }
   }, [id]);
 
-  // 重置閒置刷新計時器的函數
-  const resetInactivityTimer = useCallback(() => {
-    // 先清除舊的計時器
-    if (inactivityTimerRef.current) {
-      clearTimeout(inactivityTimerRef.current);
-    }
-    // 設定一個新的 3 秒計時器，時間到就自動刷新
-    inactivityTimerRef.current = setTimeout(() => {
-      fetchEventData();
-    }, 3000);
-  }, [fetchEventData]);
-
-  // 元件載入時的初始資料獲取和計時器設定
+  // **主要修改**: 元件載入時的副作用處理
   useEffect(() => {
     if (!id) {
       setError("沒有提供事件 ID。");
       return;
     }
+    
+    // 1. 立即獲取一次初始資料，確保使用者能馬上看到內容
     fetchEventData();
-    resetInactivityTimer();
 
-    // 元件卸載時清除所有計時器
+    // 2. **核心修正**: 將 setTimeout 改為 setInterval
+    //    這會建立一個輪詢機制，每 3 秒鐘自動呼叫 fetchEventData，
+    //    無論使用者是否有操作，都能確保所有客戶端資料同步。
+    if (pollingTimerRef.current) clearInterval(pollingTimerRef.current); // 防禦性清除
+    pollingTimerRef.current = setInterval(fetchEventData, 3000);
+
+    // 3. 元件卸載時務必清除所有計時器，避免記憶體洩漏
     return () => {
-      if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
+      if (pollingTimerRef.current) clearInterval(pollingTimerRef.current);
       if (debounceSaveTimerRef.current) clearTimeout(debounceSaveTimerRef.current);
     };
-  }, [id, fetchEventData, resetInactivityTimer]);
+  }, [id, fetchEventData]); // 依賴項不變
 
 
   const participants = useMemo<Participant[]>(() => {
@@ -86,14 +81,14 @@ const EventPage: React.FC = () => {
     })).sort((a,b) => a.name.localeCompare(b.name));
   }, [eventData]);
 
-  // **修改**：這是使用者操作的核心函數
+  // **修改**: 使用者操作的核心函數
   const handleSlotToggle = (time: string, select: boolean) => {
     if (!eventData || !username || (eventData.finalizedTime && eventData.finalizedTime.length > 0)) return;
 
-    // 1. **重置閒置計時器**：因為使用者有新動作
-    resetInactivityTimer();
+    // 1. **移除 resetInactivityTimer()**: 因為現在由固定的 setInterval 負責更新，
+    //    不再需要根據使用者操作來重置計時器。
 
-    // 2. **樂觀更新 UI**：讓使用者感覺操作立即生效
+    // 2. **樂觀更新 UI** (不變): 讓使用者感覺操作立即生效
     const newTimeSlots = eventData.timeSlots.map(slot => {
       if (slot.time === time) {
         const newParticipants = { ...slot.participants };
@@ -110,13 +105,11 @@ const EventPage: React.FC = () => {
     const updatedEventData = { ...eventData, timeSlots: newTimeSlots };
     setEventData(updatedEventData);
 
-    // 3. **設定儲存防抖**
-    // 清除上一個未執行的儲存計時器
+    // 3. **設定儲存防抖** (不變)
     if (debounceSaveTimerRef.current) {
       clearTimeout(debounceSaveTimerRef.current);
     }
 
-    // 設定一個 1 秒後的儲存操作
     debounceSaveTimerRef.current = setTimeout(async () => {
       try {
         await fetch(`${API_BASE_URL}/events/${updatedEventData.id}`, {
@@ -126,16 +119,17 @@ const EventPage: React.FC = () => {
         });
       } catch (error) {
         console.error("儲存事件資料失敗:", error);
-        // 可以在此處加入錯誤提示，或將 UI 狀態還原
+        // 如果儲存失敗，最好立即重新獲取一次伺服器狀態，以還原 UI
+        fetchEventData(); 
       }
-    }, 1000); // 1秒延遲
+    }, 1000);
   };
   
-  // 這個函數現在只用來處理確認事件，不再需要管理輪詢
+  // **修改**: 確認事件時，停止輪詢
   const updateEventDataOnFinalize = async (newEventData: EventData) => {
-    // 立即儲存最終結果，不需要防抖
+    // 停止所有計時器，因為事件已經結束，不再需要同步
+    if (pollingTimerRef.current) clearInterval(pollingTimerRef.current);
     if (debounceSaveTimerRef.current) clearTimeout(debounceSaveTimerRef.current);
-    if (inactivityTimerRef.current) clearTimeout(inactivityTimerRef.current);
 
     setEventData(newEventData);
     await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
@@ -268,7 +262,7 @@ const EventPage: React.FC = () => {
         <div className="lg:col-span-2">
             <TimeTable
                 timeSlots={eventData.timeSlots}
-                onSlotToggle={handleSlotToggle} // **傳遞新的 handleSlotToggle**
+                onSlotToggle={handleSlotToggle}
                 currentUser={username}
                 finalized={!!(eventData.finalizedTime && eventData.finalizedTime.length > 0)}
                 maxParticipants={participants.length}
@@ -284,7 +278,7 @@ const EventPage: React.FC = () => {
                   The most popular slots with {Object.keys(bestSlots[0].participants).length} of {participants.length} participants available.
                 </p>
                 <ul className="space-y-2">
-                  {bestSlots.slice(0, 5).map(slot => ( // Show up to 5 best slots
+                  {bestSlots.slice(0, 5).map(slot => (
                     <li key={slot.time} className="p-2 bg-green-100 dark:bg-green-900/50 rounded-md text-sm font-medium text-green-800 dark:text-green-200">
                       {formatDisplayTime(slot.time, eventData.eventType)}
                     </li>
