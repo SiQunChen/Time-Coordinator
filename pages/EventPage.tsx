@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo } from 'react';
+import React, { useState, useEffect, useMemo, useRef } from 'react'; 
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { EventData, Participant, EventTimeSlot } from '../types';
 import UsernameModal from '../components/UsernameModal';
@@ -11,6 +11,7 @@ const SEVEN_DAYS_IN_MS = 7 * 24 * 60 * 60 * 1000;
 const EventPage: React.FC = () => {
   const { id } = useParams<{ id: string }>();
   const navigate = useNavigate();
+  const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
   const [eventData, setEventData] = useState<EventData | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -53,16 +54,25 @@ const EventPage: React.FC = () => {
               }
           }
       };
-      
-      fetchEvent(); // 立即獲取一次
 
-      // 設定每 3 秒輪詢一次
-      const intervalId = setInterval(fetchEvent, 3000);
+      const startPolling = () => {
+        // 先執行一次，然後設定計時器
+        fetchEvent(); 
+        pollingIntervalRef.current = setInterval(fetchEvent, 3000);
+      };
+
+      const stopPolling = () => {
+          if (pollingIntervalRef.current) {
+              clearInterval(pollingIntervalRef.current);
+          }
+      };
+      
+      startPolling();
 
       // 清理函數
       return () => {
           isActive = false;
-          clearInterval(intervalId);
+          stopPolling();
       };
   }, [id]);
 
@@ -85,23 +95,40 @@ const EventPage: React.FC = () => {
   }, [eventData]);
 
   const updateEventData = async (newEventData: EventData) => {
+    // 停止輪詢，防止狀態衝突
+    if (pollingIntervalRef.current) {
+        clearInterval(pollingIntervalRef.current);
+    }
+
     // 樂觀更新 UI,讓體驗更流暢
     setEventData(newEventData);
 
     try {
-        const response = await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
+        await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
             method: 'PUT',
             headers: { 'Content-Type': 'application/json' },
             body: JSON.stringify(newEventData),
         });
+        
+        // 更新成功後，立即從伺服器獲取最新狀態
+        const response = await fetch(`${API_BASE_URL}/events/${newEventData.id}`);
+        const data = await response.json();
+        setEventData(data);
 
-        if (!response.ok) {
-            // 如果更新失敗,可以考慮將 UI 回滾到之前的狀態
-            console.error("Failed to save event data.");
-            // 可以在這裡觸發一個錯誤提示
-        }
     } catch (error) {
-        console.error("Error updating event:", error);
+        console.error("更新事件時發生錯誤:", error);
+        // 可以在此處加入錯誤提示
+    } finally {
+        // 無論成功或失敗，都重新啟動輪詢
+        pollingIntervalRef.current = setInterval(async () => {
+            try {
+                const response = await fetch(`${API_BASE_URL}/events/${id}`);
+                const data = await response.json();
+                setEventData(data);
+            } catch (e) {
+                console.error("輪詢時發生錯誤:", e);
+            }
+        }, 3000);
     }
   };
 
@@ -155,11 +182,11 @@ const EventPage: React.FC = () => {
     if (!eventData || eventData.creator !== username) return;
     const bestTimes = getBestTimeSlots();
     if(bestTimes.length > 0) {
-        // **修改這裡：傳遞所有最高票時間的字串陣列**
+        // Just pick the first best time if multiple exist
         const bestTimeStrings = bestTimes.map(slot => slot.time);
         updateEventData({ ...eventData, finalizedTime: bestTimeStrings });
     } else {
-        alert("無法確認：沒有人標示任何可用的時間。");
+        alert("Cannot finalize: no one has marked their availability for any slot.");
     }
   };
 
