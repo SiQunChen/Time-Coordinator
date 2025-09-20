@@ -22,13 +22,8 @@ const EventPage: React.FC = () => {
 
   const API_BASE_URL = 'https://time-coordinator-api.jerry92033119.workers.dev';
 
-  // 【程式碼修改 1/4】: 將 fetch, start, stop 邏輯包裝成獨立函式，方便重複呼叫
   const fetchEvent = async () => {
-    // 檢查元件是否還在掛載中，避免不必要的更新
-    if (!pollingIntervalRef.current && !debounceTimeoutRef.current && document.hidden) {
-        // 如果輪詢和 debounce 都沒在跑，且頁面在背景，就先不 fetch
-        return;
-    }
+    if (!id) return;
     try {
         const response = await fetch(`${API_BASE_URL}/events/${id}`);
         if (!response.ok) {
@@ -37,17 +32,15 @@ const EventPage: React.FC = () => {
         }
         const data = await response.json();
         
-        // 只有在沒有 pending 的使用者操作時才更新來自伺服器的資料
-        // 這是避免覆蓋樂觀更新的關鍵
         if (!debounceTimeoutRef.current) {
-            setEventData(data);
+             setEventData(data);
         }
-        
+       
         if (Date.now() - data.createdAt > SEVEN_DAYS_IN_MS) {
             setIsExpired(true);
         }
     } catch (e: any) {
-        setError(e.message);
+        if (e instanceof Error) setError(e.message);
         console.error(e);
     }
   };
@@ -60,7 +53,7 @@ const EventPage: React.FC = () => {
   };
   
   const startPolling = () => {
-      stopPolling(); // 確保不會有多個輪詢同時進行
+      stopPolling(); 
       fetchEvent(); 
       pollingIntervalRef.current = setInterval(fetchEvent, 3000);
   };
@@ -97,21 +90,49 @@ const EventPage: React.FC = () => {
     })).sort((a,b) => a.name.localeCompare(b.name));
   }, [eventData]);
 
-  // 【程式碼修改 2/4】: pushUpdatesToServer 現在會在完成後「重啟」輪詢
-  const pushUpdatesToServer = async (data: EventData) => {
+  // 【程式碼修改 1/3】: 這是最核心的修改。pushUpdatesToServer 現在會先拉取再合併。
+  const pushUpdatesToServer = async (localEventData: EventData) => {
+    if (!id || !username) return;
+
     try {
-      await fetch(`${API_BASE_URL}/events/${data.id}`, {
+      // 步驟 1: 在寫入前，先從伺服器獲取最新的資料
+      const response = await fetch(`${API_BASE_URL}/events/${id}`);
+      if (!response.ok) {
+        throw new Error("Failed to fetch latest data before updating.");
+      }
+      const serverData: EventData = await response.json();
+
+      // 步驟 2: 進行合併。我們以伺服器的資料為基礎，只把我 (目前使用者) 的選擇應用上去。
+      const mergedTimeSlots = serverData.timeSlots.map(serverSlot => {
+        const localSlot = localEventData.timeSlots.find(s => s.time === serverSlot.time);
+        // 檢查在本地的樂觀更新中，我是否選擇了這個時間點
+        const isCurrentUserSelectedInLocal = localSlot ? !!localSlot.participants[username] : false;
+
+        const mergedParticipants = { ...serverSlot.participants };
+
+        if (isCurrentUserSelectedInLocal) {
+          mergedParticipants[username] = true;
+        } else {
+          delete mergedParticipants[username];
+        }
+        
+        return { ...serverSlot, participants: mergedParticipants };
+      });
+      
+      const dataToSend = { ...serverData, timeSlots: mergedTimeSlots };
+
+      // 步驟 3: 將合併後的完美資料發送到伺服器
+      await fetch(`${API_BASE_URL}/events/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(data),
+        body: JSON.stringify(dataToSend),
       });
+
     } catch (error) {
       console.error("更新事件時發生錯誤:", error);
     } finally {
-      // 當 debounce 的更新送到伺服器後，我們就安全了
-      // 清除 debounce ref，並重新啟動輪詢來保持同步
       debounceTimeoutRef.current = null;
-      startPolling();
+      startPolling(); // 完成後重啟輪詢
     }
   };
 
@@ -126,22 +147,18 @@ const EventPage: React.FC = () => {
     setUsernameError(null);
   };
 
-  // 【程式碼修改 3/4】: handleSlotToggle 現在會在開始編輯時「暫停」輪詢
+  // 【程式碼修改 2/3】: handleSlotToggle 邏輯不變，但它傳遞的 localEventData 會被 pushUpdatesToServer 聰明地使用
   const handleSlotToggle = (time: string, select: boolean) => {
     if (!eventData || !username || eventData.finalizedTime) return;
 
-    // 如果這是新一輪操作 (沒有正在倒數的計時器)，就先暫停輪詢
-    // 這樣可以防止在我們 debounce 期間，輪詢抓回的舊資料覆蓋我們的樂觀更新
     if (!debounceTimeoutRef.current) {
         stopPolling();
     }
     
-    // 如果有正在倒數的計時器，清除它，以最新的操作為準
     if (debounceTimeoutRef.current) {
       clearTimeout(debounceTimeoutRef.current);
     }
 
-    // 樂觀更新 UI
     const newTimeSlots = eventData.timeSlots.map(slot => {
       if (slot.time === time) {
         const newParticipants = { ...slot.participants };
@@ -158,10 +175,9 @@ const EventPage: React.FC = () => {
     const updatedEventData = { ...eventData, timeSlots: newTimeSlots };
     setEventData(updatedEventData); 
 
-    // 設定新的計時器，3秒後將最新的狀態推送到伺服器
     debounceTimeoutRef.current = setTimeout(() => {
       pushUpdatesToServer(updatedEventData);
-    }, 3000); // 您可以將 3000 改回 500 或任何您覺得適合的數值
+    }, 500); // 建議將時間改回 500ms 左右以獲得最佳體驗
   };
   
   const getBestTimeSlots = (): EventTimeSlot[] => {
@@ -180,20 +196,39 @@ const EventPage: React.FC = () => {
       return eventData.timeSlots.filter(slot => Object.keys(slot.participants).length === maxParticipants);
   }
 
-  // 【程式碼修改 4/4】: Finalize 是一個獨立操作，我們也套用暫停/重啟的邏輯確保穩定
-  const handleFinalizeEvent = () => {
-    if (!eventData || eventData.creator !== username) return;
-    const bestTimes = getBestTimeSlots();
-    if(bestTimes.length > 0) {
-        const bestTimeStrings = bestTimes.map(slot => slot.time);
-        const finalEventData = { ...eventData, finalizedTime: bestTimeStrings };
-        
-        stopPolling(); // 發送重要更新前，先停止輪詢
-        setEventData(finalEventData);
-        pushUpdatesToServer(finalEventData); // pushUpdatesToServer 會在完成後自動重啟輪詢
+  // 【程式碼修改 3/3】: 同樣地，Finalize 操作也需要採用「先拉取再合併」的模式以確保安全
+  const handleFinalizeEvent = async () => {
+    if (!eventData || eventData.creator !== username || !id) return;
 
-    } else {
-        alert("Cannot finalize: no one has marked their availability for any slot.");
+    const bestTimes = getBestTimeSlots();
+    if (bestTimes.length === 0) {
+      alert("Cannot finalize: no one has marked their availability for any slot.");
+      return;
+    }
+    const bestTimeStrings = bestTimes.map(slot => slot.time);
+
+    stopPolling(); // 停止輪詢
+
+    try {
+      // 1. 拉取最新資料
+      const response = await fetch(`${API_BASE_URL}/events/${id}`);
+      if (!response.ok) throw new Error("Could not fetch latest data to finalize.");
+      const serverData = await response.json();
+
+      // 2. 合併 (應用 Finalized 時間)
+      const dataToSend = { ...serverData, finalizedTime: bestTimeStrings };
+
+      // 3. 樂觀更新並發送
+      setEventData(dataToSend);
+      await fetch(`${API_BASE_URL}/events/${id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(dataToSend),
+      });
+
+    } catch(error) {
+      console.error("Finalize event error:", error);
+      startPolling(); // 如果出錯，記得重啟輪詢
     }
   };
   
