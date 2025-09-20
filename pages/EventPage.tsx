@@ -19,9 +19,13 @@ const EventPage: React.FC = () => {
   const [username, setUsername] = useState<string | null>(() => localStorage.getItem('username'));
   const [usernameError, setUsernameError] = useState<string | null>(null);
   const [isExpired, setIsExpired] = useState(false);
+  // 【程式碼修改 1/5】: 新增 state 來控制是否只顯示自己的選擇
+  const [showMySelectionOnly, setShowMySelectionOnly] = useState(false);
+
 
   const API_BASE_URL = 'https://time-coordinator-api.jerry92033119.workers.dev';
 
+  // ... (fetchEvent, stopPolling, startPolling 函式維持不變)
   const fetchEvent = async () => {
     if (!id) return;
     try {
@@ -58,6 +62,7 @@ const EventPage: React.FC = () => {
       pollingIntervalRef.current = setInterval(fetchEvent, 3000);
   };
 
+
   useEffect(() => {
     if (!id) {
       setError("No event ID provided.");
@@ -90,22 +95,18 @@ const EventPage: React.FC = () => {
     })).sort((a,b) => a.name.localeCompare(b.name));
   }, [eventData]);
 
-  // 【程式碼修改 1/3】: 這是最核心的修改。pushUpdatesToServer 現在會先拉取再合併。
   const pushUpdatesToServer = async (localEventData: EventData) => {
     if (!id || !username) return;
 
     try {
-      // 步驟 1: 在寫入前，先從伺服器獲取最新的資料
       const response = await fetch(`${API_BASE_URL}/events/${id}`);
       if (!response.ok) {
         throw new Error("Failed to fetch latest data before updating.");
       }
       const serverData: EventData = await response.json();
 
-      // 步驟 2: 進行合併。我們以伺服器的資料為基礎，只把我 (目前使用者) 的選擇應用上去。
       const mergedTimeSlots = serverData.timeSlots.map(serverSlot => {
         const localSlot = localEventData.timeSlots.find(s => s.time === serverSlot.time);
-        // 檢查在本地的樂觀更新中，我是否選擇了這個時間點
         const isCurrentUserSelectedInLocal = localSlot ? !!localSlot.participants[username] : false;
 
         const mergedParticipants = { ...serverSlot.participants };
@@ -121,7 +122,6 @@ const EventPage: React.FC = () => {
       
       const dataToSend = { ...serverData, timeSlots: mergedTimeSlots };
 
-      // 步驟 3: 將合併後的完美資料發送到伺服器
       await fetch(`${API_BASE_URL}/events/${id}`, {
         method: 'PUT',
         headers: { 'Content-Type': 'application/json' },
@@ -132,7 +132,7 @@ const EventPage: React.FC = () => {
       console.error("更新事件時發生錯誤:", error);
     } finally {
       debounceTimeoutRef.current = null;
-      startPolling(); // 完成後重啟輪詢
+      startPolling();
     }
   };
 
@@ -143,12 +143,10 @@ const EventPage: React.FC = () => {
         return;
     }
     setUsername(name);
-    // 將 sessionStorage 改為 localStorage
     localStorage.setItem('username', name);
     setUsernameError(null);
   };
 
-  // 【程式碼修改 2/3】: handleSlotToggle 邏輯不變，但它傳遞的 localEventData 會被 pushUpdatesToServer 聰明地使用
   const handleSlotToggle = (time: string, select: boolean) => {
     if (!eventData || !username || eventData.finalizedTime) return;
 
@@ -178,9 +176,41 @@ const EventPage: React.FC = () => {
 
     debounceTimeoutRef.current = setTimeout(() => {
       pushUpdatesToServer(updatedEventData);
-    }, 500); // 建議將時間改回 500ms 左右以獲得最佳體驗
+    }, 500);
+  };
+
+  // 【程式碼修改 2/5】: 新增一個函式來處理清空使用者所有選擇的邏輯
+  const handleClearMySelections = () => {
+    if (!eventData || !username || eventData.finalizedTime) return;
+
+    // 如果正在 debounce，就取消它
+    if (debounceTimeoutRef.current) {
+      clearTimeout(debounceTimeoutRef.current);
+    }
+    // 停止輪詢以進行更新
+    stopPolling();
+
+    // 建立一個新的 timeSlots 陣列，其中目前使用者的選擇都已被移除
+    const newTimeSlots = eventData.timeSlots.map(slot => {
+      if (slot.participants[username]) {
+        const newParticipants = { ...slot.participants };
+        delete newParticipants[username];
+        return { ...slot, participants: newParticipants };
+      }
+      return slot;
+    });
+
+    const updatedEventData = { ...eventData, timeSlots: newTimeSlots };
+    // 立即更新 UI
+    setEventData(updatedEventData); 
+
+    // 透過 debounce 將更新推送到伺服器
+    debounceTimeoutRef.current = setTimeout(() => {
+      pushUpdatesToServer(updatedEventData);
+    }, 500);
   };
   
+  // ... (getBestTimeSlots, handleFinalizeEvent, formatDisplayTime, formatFinalizedTime 函式維持不變)
   const getBestTimeSlots = (): EventTimeSlot[] => {
       if (!eventData || eventData.timeSlots.length === 0) return [];
       
@@ -197,7 +227,6 @@ const EventPage: React.FC = () => {
       return eventData.timeSlots.filter(slot => Object.keys(slot.participants).length === maxParticipants);
   }
 
-  // 【程式碼修改 3/3】: 同樣地，Finalize 操作也需要採用「先拉取再合併」的模式以確保安全
   const handleFinalizeEvent = async () => {
     if (!eventData || eventData.creator !== username || !id) return;
 
@@ -208,18 +237,15 @@ const EventPage: React.FC = () => {
     }
     const bestTimeStrings = bestTimes.map(slot => slot.time);
 
-    stopPolling(); // 停止輪詢
+    stopPolling(); 
 
     try {
-      // 1. 拉取最新資料
       const response = await fetch(`${API_BASE_URL}/events/${id}`);
       if (!response.ok) throw new Error("Could not fetch latest data to finalize.");
       const serverData = await response.json();
 
-      // 2. 合併 (應用 Finalized 時間)
       const dataToSend = { ...serverData, finalizedTime: bestTimeStrings };
 
-      // 3. 樂觀更新並發送
       setEventData(dataToSend);
       await fetch(`${API_BASE_URL}/events/${id}`, {
         method: 'PUT',
@@ -229,7 +255,7 @@ const EventPage: React.FC = () => {
 
     } catch(error) {
       console.error("Finalize event error:", error);
-      startPolling(); // 如果出錯，記得重啟輪詢
+      startPolling(); 
     }
   };
   
@@ -253,9 +279,10 @@ const EventPage: React.FC = () => {
     return `Every ${days[dayIndex]} at ${timeString}`;
   }
 
-  // ----- 以下的 UI 渲染邏輯完全不需要更動 -----
 
-  if (isExpired) {
+  // ... (UI 渲染邏輯，除了 Main Event View)
+
+  if (isExpired) { // ... (維持不變)
     return (
       <div className="min-h-screen flex flex-col items-center justify-center text-center p-4">
         <h1 className="text-4xl font-bold text-red-500 mb-4">Event Expired</h1>
@@ -264,9 +291,8 @@ const EventPage: React.FC = () => {
       </div>
     );
   }
-
-  if (error) {
-    return (
+  if (error) { // ... (維持不變)
+     return (
       <div className="min-h-screen flex flex-col items-center justify-center text-center p-4">
         <h1 className="text-4xl font-bold text-red-500 mb-4">Error</h1>
         <p className="text-lg text-slate-600 dark:text-slate-300">{error}</p>
@@ -274,16 +300,13 @@ const EventPage: React.FC = () => {
       </div>
     );
   }
-
-  if (!eventData) {
+  if (!eventData) { // ... (維持不變)
     return <div className="min-h-screen flex items-center justify-center"><p>Loading event...</p></div>;
   }
-
-  if (!username) {
+  if (!username) { // ... (維持不變)
     return <UsernameModal onSubmit={handleUsernameSubmit} error={usernameError} onClearError={() => setUsernameError(null)} />;
   }
-
-  if (eventData.finalizedTime && eventData.finalizedTime.length > 0) {
+  if (eventData.finalizedTime && eventData.finalizedTime.length > 0) { // ... (維持不變)
     return (
       <div className="min-h-screen flex items-center justify-center p-4">
         <div className="w-full max-w-2xl mx-auto text-center bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700">
@@ -319,6 +342,28 @@ const EventPage: React.FC = () => {
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
         <div className="lg:col-span-2">
+            {/* 【程式碼修改 3/5】: 在時間表上方新增一個控制區塊 */}
+            <div className="bg-white dark:bg-slate-800/50 p-4 rounded-xl shadow-md border border-slate-200 dark:border-slate-700 mb-4 flex flex-col sm:flex-row items-center justify-between gap-4">
+                <div className="flex items-center">
+                    <input
+                        type="checkbox"
+                        id="showMySelectionOnly"
+                        checked={showMySelectionOnly}
+                        onChange={(e) => setShowMySelectionOnly(e.target.checked)}
+                        className="h-4 w-4 rounded border-slate-300 text-blue-600 focus:ring-blue-500"
+                    />
+                    <label htmlFor="showMySelectionOnly" className="ml-2 block text-sm text-slate-900 dark:text-slate-200">
+                        Hide others' selections
+                    </label>
+                </div>
+                <button
+                    onClick={handleClearMySelections}
+                    disabled={!!eventData.finalizedTime}
+                    className="px-4 py-2 text-sm font-medium text-red-600 bg-red-100 border border-transparent rounded-md hover:bg-red-200 focus:outline-none focus-visible:ring-2 focus-visible:ring-offset-2 focus-visible:ring-red-500 disabled:opacity-50 disabled:cursor-not-allowed"
+                >
+                    Clear my selections
+                </button>
+            </div>
             <TimeTable
                 timeSlots={eventData.timeSlots}
                 onSlotToggle={handleSlotToggle}
@@ -327,10 +372,13 @@ const EventPage: React.FC = () => {
                 maxParticipants={participants.length}
                 bestSlots={bestSlots.map(s => s.time)}
                 eventType={eventData.eventType}
+                // 【程式碼修改 4/5】: 將新的 state 傳遞給 TimeTable 元件
+                showMySelectionOnly={showMySelectionOnly}
             />
         </div>
         <div className="lg:col-span-1 space-y-6">
-            {bestSlots.length > 0 && (
+            {/* 【程式碼修改 5/5】: 當只顯示自己選擇時，隱藏「最佳時段」區塊 */}
+            {!showMySelectionOnly && bestSlots.length > 0 && (
               <div className="bg-white dark:bg-slate-800 p-6 rounded-xl shadow-md border border-slate-200 dark:border-slate-700">
                 <h3 className="text-xl font-semibold mb-3 text-slate-800 dark:text-slate-100">🔥 Top Times</h3>
                 <p className="text-sm text-slate-500 dark:text-slate-400 mb-4">

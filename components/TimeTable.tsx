@@ -1,4 +1,3 @@
-
 import React, { useState, useEffect, useRef } from 'react';
 import { EventTimeSlot, EventType } from '../types';
 import { UsersIcon } from './icons/UsersIcon';
@@ -11,6 +10,8 @@ interface TimeTableProps {
   maxParticipants: number;
   bestSlots: string[];
   eventType: EventType;
+  // 【程式碼修改 1/6】: 新增 showMySelectionOnly 屬性
+  showMySelectionOnly: boolean;
 }
 
 interface GroupedSlots {
@@ -30,9 +31,13 @@ const TimeSlotComponent: React.FC<{
     color: string;
     isBestSlot: boolean;
     eventType: EventType;
-}> = ({ slot, isCurrentUserAvailable, onMouseDown, onMouseEnter, isDisabled, color, isBestSlot, eventType }) => {
+    // 【程式碼修改 2/6】: 新增兩個屬性來控制顯示
+    displayParticipantCount: number;
+    showTooltip: boolean;
+}> = ({ slot, isCurrentUserAvailable, onMouseDown, onMouseEnter, isDisabled, color, isBestSlot, eventType, displayParticipantCount, showTooltip }) => {
     const [isHovered, setIsHovered] = useState(false);
-    const participantCount = Object.keys(slot.participants).length;
+    // 原始參與人數，用於決定是否要顯示 tooltip
+    const originalParticipantCount = Object.keys(slot.participants).length;
 
     const getTimeLabel = () => {
         if (eventType === 'date-based') {
@@ -61,10 +66,12 @@ const TimeSlotComponent: React.FC<{
                 </div>
                 <div className="flex items-center gap-1 mt-1 text-xs">
                     <UsersIcon className="w-4 h-4" />
-                    <span>{participantCount}</span>
+                    {/* 使用 displayParticipantCount 來顯示人數 */}
+                    <span>{displayParticipantCount}</span>
                 </div>
             </div>
-            {isHovered && participantCount > 0 && (
+            {/* 【程式碼修改 3/6】: 根據 showTooltip 條件性地顯示參與者列表 */}
+            {isHovered && showTooltip && originalParticipantCount > 0 && (
                 <div className="absolute z-10 bottom-full mb-2 w-max max-w-xs p-3 bg-slate-800 text-white text-sm rounded-lg shadow-lg pointer-events-none">
                     <h4 className="font-bold mb-1">Available:</h4>
                     <ul className="list-disc list-inside">
@@ -79,9 +86,9 @@ const TimeSlotComponent: React.FC<{
 };
 
 
-const TimeTable: React.FC<TimeTableProps> = ({ timeSlots, onSlotToggle, currentUser, finalized, maxParticipants, bestSlots, eventType }) => {
+const TimeTable: React.FC<TimeTableProps> = ({ timeSlots, onSlotToggle, currentUser, finalized, maxParticipants, bestSlots, eventType, showMySelectionOnly }) => {
   const [isSelecting, setIsSelecting] = useState(false);
-  const [selectMode, setSelectMode] = useState<boolean>(true); // true for selecting, false for deselecting
+  const [selectMode, setSelectMode] = useState<boolean>(true);
   const tableRef = useRef<HTMLDivElement>(null);
 
   useEffect(() => {
@@ -119,8 +126,18 @@ const TimeTable: React.FC<TimeTableProps> = ({ timeSlots, onSlotToggle, currentU
     return acc;
   }, {} as GroupedSlots);
 
-  const getSlotColor = (participantCount: number) => {
+  // 【程式碼修改 4/6】: 修改顏色邏輯以應對新模式
+  const getSlotColor = (participantCount: number, isCurrentUserAvailable: boolean) => {
     if (finalized) return 'bg-slate-200 dark:bg-slate-700 text-slate-500';
+
+    // 當「只顯示自己」模式開啟時，使用藍色來突顯自己的選擇
+    if (showMySelectionOnly) {
+        return isCurrentUserAvailable
+            ? 'bg-blue-400 hover:bg-blue-500 dark:bg-blue-700 dark:hover:bg-blue-600 text-blue-900 dark:text-white'
+            : 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700';
+    }
+    
+    // 原始的顏色邏輯
     if (participantCount === 0) return 'bg-slate-100 hover:bg-slate-200 dark:bg-slate-800 dark:hover:bg-slate-700';
     
     const percentage = maxParticipants > 0 ? participantCount / maxParticipants : 0;
@@ -129,7 +146,7 @@ const TimeTable: React.FC<TimeTableProps> = ({ timeSlots, onSlotToggle, currentU
     return 'bg-green-400 hover:bg-green-500 dark:bg-green-700 dark:hover:bg-green-600 text-green-900 dark:text-white';
   };
   
-  const getHeader = (key: string) => {
+  const getHeader = (key: string) => { // ... (維持不變)
     if (eventType === 'date-based') {
         const date = new Date(key);
         return (
@@ -161,19 +178,33 @@ const TimeTable: React.FC<TimeTableProps> = ({ timeSlots, onSlotToggle, currentU
                             {getHeader(key)}
                         </div>
                         <div className="space-y-2">
-                            {groupedSlots[key].map(slot => (
-                                <TimeSlotComponent
-                                    key={slot.time}
-                                    slot={slot}
-                                    isCurrentUserAvailable={!!slot.participants[currentUser]}
-                                    onMouseDown={() => handleMouseDown(slot)}
-                                    onMouseEnter={() => handleMouseEnter(slot)}
-                                    isDisabled={finalized}
-                                    color={getSlotColor(Object.keys(slot.participants).length)}
-                                    isBestSlot={bestSlots.includes(slot.time)}
-                                    eventType={eventType}
-                                />
-                            ))}
+                            {groupedSlots[key].map(slot => {
+                                // 【程式碼修改 5/6】: 在這裡準備要傳遞給 TimeSlotComponent 的屬性
+                                const isCurrentUserAvailable = !!slot.participants[currentUser];
+                                const originalParticipantCount = Object.keys(slot.participants).length;
+                                
+                                // 根據模式決定要顯示的人數
+                                const displayParticipantCount = showMySelectionOnly
+                                    ? (isCurrentUserAvailable ? 1 : 0)
+                                    : originalParticipantCount;
+
+                                return (
+                                    <TimeSlotComponent
+                                        key={slot.time}
+                                        slot={slot}
+                                        isCurrentUserAvailable={isCurrentUserAvailable}
+                                        onMouseDown={() => handleMouseDown(slot)}
+                                        onMouseEnter={() => handleMouseEnter(slot)}
+                                        isDisabled={finalized}
+                                        color={getSlotColor(originalParticipantCount, isCurrentUserAvailable)}
+                                        // 【程式碼修改 6/6】: 當過濾時，隱藏「最佳時段」的邊框
+                                        isBestSlot={!showMySelectionOnly && bestSlots.includes(slot.time)}
+                                        eventType={eventType}
+                                        displayParticipantCount={displayParticipantCount}
+                                        showTooltip={!showMySelectionOnly}
+                                    />
+                                );
+                            })}
                         </div>
                     </div>
                 ))}
