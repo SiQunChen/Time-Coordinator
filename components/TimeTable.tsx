@@ -173,7 +173,7 @@ const TimeTable: React.FC<TimeTableProps> = ({ timeSlots, onSlotToggle, currentU
                     if (eventType === 'weekly') return parseInt(a) - parseInt(b);
                     return new Date(a).getTime() - new Date(b).getTime();
                 }).map(key => (
-                    <div key={key} className="min-w-[150px] flex-shrink-0">
+                    <div key={key} className="min-w-[120px] sm:min-w-[150px] flex-shrink-0">
                         <div className="text-center font-bold mb-4 p-2 rounded-lg bg-slate-100 dark:bg-slate-700 select-none">
                             {getHeader(key)}
                         </div>
