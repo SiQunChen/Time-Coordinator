@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef, useCallback } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { EventData, Participant, EventTimeSlot } from '../types';
 import UsernameModal from '../components/UsernameModal';
@@ -18,65 +18,53 @@ const EventPage: React.FC = () => {
   const [usernameError, setUsernameError] = useState<string | null>(null);
   const [isExpired, setIsExpired] = useState(false);
 
-  const debounceSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
-  // **新增**: 使用 useRef 來控制長輪詢的啟動與停止狀態
-  // 使用 Ref 是為了避免狀態變更時觸發不必要的 re-render
-  const isPollingActive = useRef(true);
-  
   const API_BASE_URL = 'https://time-coordinator-api.jerry92033119.workers.dev';
 
-  // 從伺服器獲取最新事件資料的函數 (此函數本身不變)
-  const fetchEventData = useCallback(async () => {
-    if (!id) return;
-    try {
-      const response = await fetch(`${API_BASE_URL}/events/${id}`);
-      if (!response.ok) {
-        throw new Error("無法獲取事件資料");
-      }
-      const data = await response.json();
-      setEventData(data);
-    } catch (e) {
-      // 將錯誤向上拋出，讓長輪詢的循環可以捕捉到
-      throw e; 
-    }
-  }, [id]);
-
-  // **主要修改**: 元件載入時的副作用處理，改為長輪詢
+  // 主要的資料獲取和輪詢邏輯
   useEffect(() => {
-    if (!id) {
-      setError("沒有提供事件 ID。");
-      return;
-    }
-    
-    // **核心修正**: 建立一個遞迴的長輪詢函數
-    const longPoll = async () => {
-      // 檢查 flag，如果被設為 false，就中斷輪詢
-      if (!isPollingActive.current) {
+      if (!id) {
+        setError("No event ID provided.");
         return;
       }
 
-      try {
-        await fetchEventData();
-      } catch (e) {
-        console.error("獲取資料失敗:", e);
-        // 如果發生錯誤 (例如網路問題或伺服器錯誤)，等待 5 秒後再重試
-        await new Promise(resolve => setTimeout(resolve, 5000));
-      }
+      let isActive = true; // 防止在元件卸載後還在更新狀態
+
+      const fetchEvent = async () => {
+          try {
+              const response = await fetch(`${API_BASE_URL}/events/${id}`);
+              if (!response.ok) {
+                  if(response.status === 404) throw new Error("Event not found. The link might be incorrect or the event has expired.");
+                  throw new Error("Failed to load event data.");
+              }
+              const data = await response.json();
+              
+              if (isActive) {
+                  // 這裡可以保留或移除過期邏輯,或者由後端處理
+                  if (Date.now() - data.createdAt > SEVEN_DAYS_IN_MS) {
+                      setIsExpired(true);
+                  } else {
+                      setEventData(data);
+                  }
+              }
+          } catch (e: any) {
+              if (isActive) {
+                  setError(e.message);
+                  console.error(e);
+              }
+          }
+      };
       
-      // 不論成功或失敗，只要輪詢未被停止，就立即（或延遲後）進行下一次呼叫
-      longPoll();
-    };
+      fetchEvent(); // 立即獲取一次
 
-    // 啟動長輪詢
-    longPoll();
+      // 設定每 3 秒輪詢一次
+      const intervalId = setInterval(fetchEvent, 3000);
 
-    // **重要**: 元件卸載時，更新 flag 來停止輪詢循環
-    return () => {
-      isPollingActive.current = false;
-      if (debounceSaveTimerRef.current) clearTimeout(debounceSaveTimerRef.current);
-    };
-  }, [id, fetchEventData]); // 依賴項不變
-
+      // 清理函數
+      return () => {
+          isActive = false;
+          clearInterval(intervalId);
+      };
+  }, [id]);
 
   const participants = useMemo<Participant[]>(() => {
     if (!eventData) return [];
@@ -96,9 +84,40 @@ const EventPage: React.FC = () => {
     })).sort((a,b) => a.name.localeCompare(b.name));
   }, [eventData]);
 
-  // 使用者操作的核心函數 (不變)
+  const updateEventData = async (newEventData: EventData) => {
+    // 樂觀更新 UI,讓體驗更流暢
+    setEventData(newEventData);
+
+    try {
+        const response = await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
+            method: 'PUT',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify(newEventData),
+        });
+
+        if (!response.ok) {
+            // 如果更新失敗,可以考慮將 UI 回滾到之前的狀態
+            console.error("Failed to save event data.");
+            // 可以在這裡觸發一個錯誤提示
+        }
+    } catch (error) {
+        console.error("Error updating event:", error);
+    }
+  };
+
+  const handleUsernameSubmit = (name: string) => {
+    const isNameTaken = participants.some(p => p.name.toLowerCase() === name.toLowerCase());
+    if(isNameTaken) {
+        setUsernameError("This name is already taken. Please choose another one.");
+        return;
+    }
+    setUsername(name);
+    sessionStorage.setItem('username', name);
+    setUsernameError(null);
+  };
+
   const handleSlotToggle = (time: string, select: boolean) => {
-    if (!eventData || !username || (eventData.finalizedTime && eventData.finalizedTime.length > 0)) return;
+    if (!eventData || !username || eventData.finalizedTime) return;
 
     const newTimeSlots = eventData.timeSlots.map(slot => {
       if (slot.time === time) {
@@ -112,41 +131,10 @@ const EventPage: React.FC = () => {
       }
       return slot;
     });
-    
-    const updatedEventData = { ...eventData, timeSlots: newTimeSlots };
-    setEventData(updatedEventData);
 
-    if (debounceSaveTimerRef.current) {
-      clearTimeout(debounceSaveTimerRef.current);
-    }
-
-    debounceSaveTimerRef.current = setTimeout(async () => {
-      try {
-        await fetch(`${API_BASE_URL}/events/${updatedEventData.id}`, {
-          method: 'PUT',
-          headers: { 'Content-Type': 'application/json' },
-          body: JSON.stringify(updatedEventData),
-        });
-      } catch (error) {
-        console.error("儲存事件資料失敗:", error);
-      }
-    }, 1000);
+    updateEventData({ ...eventData, timeSlots: newTimeSlots });
   };
   
-  // **修改**: 確認事件時，停止長輪詢
-  const updateEventDataOnFinalize = async (newEventData: EventData) => {
-    // 停止輪詢
-    isPollingActive.current = false;
-    if (debounceSaveTimerRef.current) clearTimeout(debounceSaveTimerRef.current);
-
-    setEventData(newEventData);
-    await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
-        method: 'PUT',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify(newEventData),
-    });
-  };
-
   const getBestTimeSlots = (): EventTimeSlot[] => {
       if (!eventData || eventData.timeSlots.length === 0) return [];
       
@@ -167,22 +155,12 @@ const EventPage: React.FC = () => {
     if (!eventData || eventData.creator !== username) return;
     const bestTimes = getBestTimeSlots();
     if(bestTimes.length > 0) {
+        // **修改這裡：傳遞所有最高票時間的字串陣列**
         const bestTimeStrings = bestTimes.map(slot => slot.time);
-        updateEventDataOnFinalize({ ...eventData, finalizedTime: bestTimeStrings });
+        updateEventData({ ...eventData, finalizedTime: bestTimeStrings });
     } else {
         alert("無法確認：沒有人標示任何可用的時間。");
     }
-  };
-
-  const handleUsernameSubmit = (name: string) => {
-    const isNameTaken = participants.some(p => p.name.toLowerCase() === name.toLowerCase());
-    if(isNameTaken) {
-        setUsernameError("這個名稱已經被使用，請選擇其他名稱。");
-        return;
-    }
-    setUsername(name);
-    sessionStorage.setItem('username', name);
-    setUsernameError(null);
   };
 
   const formatDisplayTime = (time: string, eventType: 'date-based' | 'weekly'): string => {
@@ -192,20 +170,20 @@ const EventPage: React.FC = () => {
     const [dayIndex, hour] = time.split('-').map(Number);
     const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
     const timeString = new Date(`1970-01-01T${String(hour).padStart(2, '0')}:00:00`).toLocaleTimeString([], { timeStyle: 'short' });
-    return `每週 ${days[dayIndex]} ${timeString}`;
+    return `Every ${days[dayIndex]} at ${timeString}`;
   }
   
-  const formatFinalizedTime = (time: string, eventType: 'date-based' | 'weekly'): string => {
+    const formatFinalizedTime = (time: string, eventType: 'date-based' | 'weekly'): string => {
     if (eventType === 'date-based') {
       return new Date(time).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' });
     }
     const [dayIndex, hour] = time.split('-').map(Number);
     const days = ["Sunday", "Monday", "Tuesday", "Wednesday", "Thursday", "Friday", "Saturday"];
     const timeString = new Date(`1970-01-01T${String(hour).padStart(2, '0')}:00:00`).toLocaleTimeString([], { timeStyle: 'short' });
-    return `每週 ${days[dayIndex]} ${timeString}`;
+    return `Every ${days[dayIndex]} at ${timeString}`;
   }
 
-  // ... (下方的 JSX 渲染邏輯保持不變)
+
   if (isExpired) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center text-center p-4">
@@ -240,11 +218,14 @@ const EventPage: React.FC = () => {
         <div className="w-full max-w-2xl mx-auto text-center bg-white dark:bg-slate-800 p-8 rounded-2xl shadow-lg border border-slate-200 dark:border-slate-700">
            <CheckCircleIcon className="h-16 w-16 text-green-500 mx-auto mb-4" />
           <h1 className="text-3xl font-bold text-slate-800 dark:text-slate-100 mb-2">活動時間已確認！</h1>
-          <p className="text-lg text-slate-600 dark:text-slate-300 mb-4">活動 <span className="font-semibold text-blue-500">{eventData.eventName}</span> 的最佳時間選項如下：</p>
+          <p className="text-lg text-slate-600 dark:text-slate-300 mb-4">
+            活動 <span className="font-semibold text-blue-500">{eventData.eventName}</span> 的最佳時間選項如下：
+          </p>
+          {/* **修改這裡：使用 ul 和 map 來顯示所有時間** */}
           <div className="bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-200 text-xl font-semibold p-4 rounded-lg">
-            <ul className="space-y-2 text-left">
+            <ul className="space-y-2">
               {eventData.finalizedTime.map(time => (
-                <li key={time} className="pl-2">
+                <li key={time}>
                   {formatFinalizedTime(time, eventData.eventType)}
                 </li>
               ))}
@@ -262,8 +243,8 @@ const EventPage: React.FC = () => {
     <div className="container mx-auto p-4 md:p-8">
       <header className="mb-8">
         <h1 className="text-4xl font-bold tracking-tight">{eventData.eventName}</h1>
-        <p className="text-slate-500 dark:text-slate-400">建立者: {eventData.creator}</p>
-        <p className="text-slate-500 dark:text-slate-400">您目前登入的身分是: <span className="font-bold text-blue-500">{username}</span></p>
+        <p className="text-slate-500 dark:text-slate-400">Created by: {eventData.creator}</p>
+        <p className="text-slate-500 dark:text-slate-400">You are signed in as: <span className="font-bold text-blue-500">{username}</span></p>
       </header>
 
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-8">
@@ -272,7 +253,7 @@ const EventPage: React.FC = () => {
                 timeSlots={eventData.timeSlots}
                 onSlotToggle={handleSlotToggle}
                 currentUser={username}
-                finalized={!!(eventData.finalizedTime && eventData.finalizedTime.length > 0)}
+                finalized={!!eventData.finalizedTime}
                 maxParticipants={participants.length}
                 bestSlots={bestSlots.map(s => s.time)}
                 eventType={eventData.eventType}
@@ -286,7 +267,7 @@ const EventPage: React.FC = () => {
                   The most popular slots with {Object.keys(bestSlots[0].participants).length} of {participants.length} participants available.
                 </p>
                 <ul className="space-y-2">
-                  {bestSlots.slice(0, 5).map(slot => (
+                  {bestSlots.slice(0, 5).map(slot => ( // Show up to 5 best slots
                     <li key={slot.time} className="p-2 bg-green-100 dark:bg-green-900/50 rounded-md text-sm font-medium text-green-800 dark:text-green-200">
                       {formatDisplayTime(slot.time, eventData.eventType)}
                     </li>
