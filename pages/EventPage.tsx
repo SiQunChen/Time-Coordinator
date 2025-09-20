@@ -1,4 +1,4 @@
-import React, { useState, useEffect, useMemo, useRef } from 'react'; 
+import React, { useState, useEffect, useMemo, useRef } from 'react';
 import { useParams, useNavigate, Link } from 'react-router-dom';
 import { EventData, Participant, EventTimeSlot } from '../types';
 import UsernameModal from '../components/UsernameModal';
@@ -13,6 +13,9 @@ const EventPage: React.FC = () => {
   const navigate = useNavigate();
   const pollingIntervalRef = useRef<NodeJS.Timeout | null>(null);
   
+  // 【程式碼修改 1/5】: 新增一個 ref 來存放 debounce 的計時器
+  const debounceTimeoutRef = useRef<NodeJS.Timeout | null>(null);
+
   const [eventData, setEventData] = useState<EventData | null>(null);
   const [error, setError] = useState<string | null>(null);
   const [username, setUsername] = useState<string | null>(() => sessionStorage.getItem('username'));
@@ -21,59 +24,60 @@ const EventPage: React.FC = () => {
 
   const API_BASE_URL = 'https://time-coordinator-api.jerry92033119.workers.dev';
 
-  // 主要的資料獲取和輪詢邏輯
+  // 主要的資料獲取和輪詢邏輯 (這部分維持不變)
   useEffect(() => {
-      if (!id) {
-        setError("No event ID provided.");
-        return;
-      }
+    if (!id) {
+      setError("No event ID provided.");
+      return;
+    }
 
-      let isActive = true; // 防止在元件卸載後還在更新狀態
+    let isActive = true;
 
-      const fetchEvent = async () => {
-          try {
-              const response = await fetch(`${API_BASE_URL}/events/${id}`);
-              if (!response.ok) {
-                  if(response.status === 404) throw new Error("Event not found. The link might be incorrect or the event has expired.");
-                  throw new Error("Failed to load event data.");
-              }
-              const data = await response.json();
-              
-              if (isActive) {
-                  // 這裡可以保留或移除過期邏輯,或者由後端處理
-                  if (Date.now() - data.createdAt > SEVEN_DAYS_IN_MS) {
-                      setIsExpired(true);
-                  } else {
-                      setEventData(data);
-                  }
-              }
-          } catch (e: any) {
-              if (isActive) {
-                  setError(e.message);
-                  console.error(e);
-              }
-          }
-      };
+    const fetchEvent = async () => {
+        try {
+            const response = await fetch(`${API_BASE_URL}/events/${id}`);
+            if (!response.ok) {
+                if(response.status === 404) throw new Error("Event not found. The link might be incorrect or the event has expired.");
+                throw new Error("Failed to load event data.");
+            }
+            const data = await response.json();
+            
+            if (isActive) {
+                if (Date.now() - data.createdAt > SEVEN_DAYS_IN_MS) {
+                    setIsExpired(true);
+                } else {
+                    setEventData(data);
+                }
+            }
+        } catch (e: any) {
+            if (isActive) {
+                setError(e.message);
+                console.error(e);
+            }
+        }
+    };
 
-      const startPolling = () => {
-        // 先執行一次，然後設定計時器
-        fetchEvent(); 
-        pollingIntervalRef.current = setInterval(fetchEvent, 3000);
-      };
+    const startPolling = () => {
+      fetchEvent(); 
+      pollingIntervalRef.current = setInterval(fetchEvent, 3000);
+    };
 
-      const stopPolling = () => {
-          if (pollingIntervalRef.current) {
-              clearInterval(pollingIntervalRef.current);
-          }
-      };
-      
-      startPolling();
+    const stopPolling = () => {
+        if (pollingIntervalRef.current) {
+            clearInterval(pollingIntervalRef.current);
+        }
+    };
+    
+    startPolling();
 
-      // 清理函數
-      return () => {
-          isActive = false;
-          stopPolling();
-      };
+    return () => {
+        isActive = false;
+        stopPolling();
+        // 元件卸載時也清除 debounce 計時器，避免 memory leak
+        if (debounceTimeoutRef.current) {
+            clearTimeout(debounceTimeoutRef.current);
+        }
+    };
   }, [id]);
 
   const participants = useMemo<Participant[]>(() => {
@@ -94,41 +98,19 @@ const EventPage: React.FC = () => {
     })).sort((a,b) => a.name.localeCompare(b.name));
   }, [eventData]);
 
-  const updateEventData = async (newEventData: EventData) => {
-    // 停止輪詢，防止狀態衝突
-    if (pollingIntervalRef.current) {
-        clearInterval(pollingIntervalRef.current);
-    }
-
-    // 樂觀更新 UI,讓體驗更流暢
-    setEventData(newEventData);
-
+  // 【程式碼修改 2/5】: 建立一個專門用來發送更新到伺服器的函式
+  // 這個函式很單純，只負責發送 PUT 請求，不做其他任何事情 (例如停止輪詢或更新 state)
+  const pushUpdatesToServer = async (data: EventData) => {
     try {
-        await fetch(`${API_BASE_URL}/events/${newEventData.id}`, {
-            method: 'PUT',
-            headers: { 'Content-Type': 'application/json' },
-            body: JSON.stringify(newEventData),
-        });
-        
-        // 更新成功後，立即從伺服器獲取最新狀態
-        const response = await fetch(`${API_BASE_URL}/events/${newEventData.id}`);
-        const data = await response.json();
-        setEventData(data);
-
+      await fetch(`${API_BASE_URL}/events/${data.id}`, {
+        method: 'PUT',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify(data),
+      });
+      // 發送成功後不用做任何事，讓背景輪詢去同步最新狀態即可
     } catch (error) {
-        console.error("更新事件時發生錯誤:", error);
-        // 可以在此處加入錯誤提示
-    } finally {
-        // 無論成功或失敗，都重新啟動輪詢
-        pollingIntervalRef.current = setInterval(async () => {
-            try {
-                const response = await fetch(`${API_BASE_URL}/events/${id}`);
-                const data = await response.json();
-                setEventData(data);
-            } catch (e) {
-                console.error("輪詢時發生錯誤:", e);
-            }
-        }, 3000);
+      console.error("更新事件時發生錯誤:", error);
+      // 可以在這裡加入錯誤提示給使用者
     }
   };
 
@@ -143,9 +125,11 @@ const EventPage: React.FC = () => {
     setUsernameError(null);
   };
 
+  // 【程式碼修改 3/5】: 這是最核心的修改。handleSlotToggle 現在會進行樂觀更新並使用 debounce
   const handleSlotToggle = (time: string, select: boolean) => {
     if (!eventData || !username || eventData.finalizedTime) return;
 
+    // 步驟 1: 立即進行樂觀更新，讓 UI 保持流暢
     const newTimeSlots = eventData.timeSlots.map(slot => {
       if (slot.time === time) {
         const newParticipants = { ...slot.participants };
@@ -159,7 +143,21 @@ const EventPage: React.FC = () => {
       return slot;
     });
 
-    updateEventData({ ...eventData, timeSlots: newTimeSlots });
+    const updatedEventData = { ...eventData, timeSlots: newTimeSlots };
+    setEventData(updatedEventData); // 直接更新畫面 state
+
+    // 步驟 2: 使用 Debounce 來發送 API 請求
+    // 如果之前已經有一個計時器在跑，就先清除它
+    if (debounceTimeoutRef.current) {
+      clearTimeout(debounceTimeoutRef.current);
+    }
+
+    // 設定一個新的計時器，在 500 毫秒後執行。
+    // 如果使用者在這 500 毫秒內又操作了，這個計時器會被上面的 clearTimeout 清除，然後重新設定。
+    // 直到使用者停止操作 500 毫秒，才會真的把最新的狀態發送到伺服器。
+    debounceTimeoutRef.current = setTimeout(() => {
+      pushUpdatesToServer(updatedEventData);
+    }, 500); // 500ms 的延遲是一個比較舒適的體驗
   };
   
   const getBestTimeSlots = (): EventTimeSlot[] => {
@@ -178,17 +176,28 @@ const EventPage: React.FC = () => {
       return eventData.timeSlots.filter(slot => Object.keys(slot.participants).length === maxParticipants);
   }
 
+  // 【程式碼修改 4/5】: 將 handleFinalizeEvent 中的 updateEventData 替換掉
   const handleFinalizeEvent = () => {
     if (!eventData || eventData.creator !== username) return;
     const bestTimes = getBestTimeSlots();
     if(bestTimes.length > 0) {
-        // Just pick the first best time if multiple exist
         const bestTimeStrings = bestTimes.map(slot => slot.time);
-        updateEventData({ ...eventData, finalizedTime: bestTimeStrings });
+        
+        // 這是單次操作，不需要 debounce，但我們一樣使用新的邏輯流程
+        const finalEventData = { ...eventData, finalizedTime: bestTimeStrings };
+        
+        // 1. 樂觀更新 UI
+        setEventData(finalEventData);
+        // 2. 直接發送請求到伺服器
+        pushUpdatesToServer(finalEventData);
+
     } else {
         alert("Cannot finalize: no one has marked their availability for any slot.");
     }
   };
+
+  // 【程式碼修改 5/5】: 舊的 updateEventData 函式現在已經不需要了，可以直接刪除。
+
 
   const formatDisplayTime = (time: string, eventType: 'date-based' | 'weekly'): string => {
     if (eventType === 'date-based') {
@@ -200,7 +209,7 @@ const EventPage: React.FC = () => {
     return `Every ${days[dayIndex]} at ${timeString}`;
   }
   
-    const formatFinalizedTime = (time: string, eventType: 'date-based' | 'weekly'): string => {
+  const formatFinalizedTime = (time: string, eventType: 'date-based' | 'weekly'): string => {
     if (eventType === 'date-based') {
       return new Date(time).toLocaleString([], { dateStyle: 'full', timeStyle: 'short' });
     }
@@ -210,6 +219,7 @@ const EventPage: React.FC = () => {
     return `Every ${days[dayIndex]} at ${timeString}`;
   }
 
+  // ----- 以下的 UI 渲染邏輯完全不需要更動 -----
 
   if (isExpired) {
     return (
@@ -248,7 +258,6 @@ const EventPage: React.FC = () => {
           <p className="text-lg text-slate-600 dark:text-slate-300 mb-4">
             活動 <span className="font-semibold text-blue-500">{eventData.eventName}</span> 的最佳時間選項如下：
           </p>
-          {/* **修改這裡：使用 ul 和 map 來顯示所有時間** */}
           <div className="bg-blue-100 dark:bg-blue-900/50 text-blue-800 dark:text-blue-200 text-xl font-semibold p-4 rounded-lg">
             <ul className="space-y-2">
               {eventData.finalizedTime.map(time => (
@@ -294,7 +303,7 @@ const EventPage: React.FC = () => {
                   The most popular slots with {Object.keys(bestSlots[0].participants).length} of {participants.length} participants available.
                 </p>
                 <ul className="space-y-2">
-                  {bestSlots.slice(0, 5).map(slot => ( // Show up to 5 best slots
+                  {bestSlots.slice(0, 5).map(slot => (
                     <li key={slot.time} className="p-2 bg-green-100 dark:bg-green-900/50 rounded-md text-sm font-medium text-green-800 dark:text-green-200">
                       {formatDisplayTime(slot.time, eventData.eventType)}
                     </li>
