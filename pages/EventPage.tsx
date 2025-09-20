@@ -18,9 +18,10 @@ const EventPage: React.FC = () => {
   const [usernameError, setUsernameError] = useState<string | null>(null);
   const [isExpired, setIsExpired] = useState(false);
 
-  // **修改**: 將原本的 inactivityTimerRef 改為 pollingTimerRef，語意更清晰
-  const pollingTimerRef = useRef<NodeJS.Timeout | null>(null);
   const debounceSaveTimerRef = useRef<NodeJS.Timeout | null>(null);
+  // **新增**: 使用 useRef 來控制長輪詢的啟動與停止狀態
+  // 使用 Ref 是為了避免狀態變更時觸發不必要的 re-render
+  const isPollingActive = useRef(true);
   
   const API_BASE_URL = 'https://time-coordinator-api.jerry92033119.workers.dev';
 
@@ -35,29 +36,43 @@ const EventPage: React.FC = () => {
       const data = await response.json();
       setEventData(data);
     } catch (e) {
-      console.error("獲取資料失敗:", e);
+      // 將錯誤向上拋出，讓長輪詢的循環可以捕捉到
+      throw e; 
     }
   }, [id]);
 
-  // **主要修改**: 元件載入時的副作用處理
+  // **主要修改**: 元件載入時的副作用處理，改為長輪詢
   useEffect(() => {
     if (!id) {
       setError("沒有提供事件 ID。");
       return;
     }
     
-    // 1. 立即獲取一次初始資料，確保使用者能馬上看到內容
-    fetchEventData();
+    // **核心修正**: 建立一個遞迴的長輪詢函數
+    const longPoll = async () => {
+      // 檢查 flag，如果被設為 false，就中斷輪詢
+      if (!isPollingActive.current) {
+        return;
+      }
 
-    // 2. **核心修正**: 將 setTimeout 改為 setInterval
-    //    這會建立一個輪詢機制，每 3 秒鐘自動呼叫 fetchEventData，
-    //    無論使用者是否有操作，都能確保所有客戶端資料同步。
-    if (pollingTimerRef.current) clearInterval(pollingTimerRef.current); // 防禦性清除
-    pollingTimerRef.current = setInterval(fetchEventData, 3000);
+      try {
+        await fetchEventData();
+      } catch (e) {
+        console.error("獲取資料失敗:", e);
+        // 如果發生錯誤 (例如網路問題或伺服器錯誤)，等待 5 秒後再重試
+        await new Promise(resolve => setTimeout(resolve, 5000));
+      }
+      
+      // 不論成功或失敗，只要輪詢未被停止，就立即（或延遲後）進行下一次呼叫
+      longPoll();
+    };
 
-    // 3. 元件卸載時務必清除所有計時器，避免記憶體洩漏
+    // 啟動長輪詢
+    longPoll();
+
+    // **重要**: 元件卸載時，更新 flag 來停止輪詢循環
     return () => {
-      if (pollingTimerRef.current) clearInterval(pollingTimerRef.current);
+      isPollingActive.current = false;
       if (debounceSaveTimerRef.current) clearTimeout(debounceSaveTimerRef.current);
     };
   }, [id, fetchEventData]); // 依賴項不變
@@ -81,14 +96,10 @@ const EventPage: React.FC = () => {
     })).sort((a,b) => a.name.localeCompare(b.name));
   }, [eventData]);
 
-  // **修改**: 使用者操作的核心函數
+  // 使用者操作的核心函數 (不變)
   const handleSlotToggle = (time: string, select: boolean) => {
     if (!eventData || !username || (eventData.finalizedTime && eventData.finalizedTime.length > 0)) return;
 
-    // 1. **移除 resetInactivityTimer()**: 因為現在由固定的 setInterval 負責更新，
-    //    不再需要根據使用者操作來重置計時器。
-
-    // 2. **樂觀更新 UI** (不變): 讓使用者感覺操作立即生效
     const newTimeSlots = eventData.timeSlots.map(slot => {
       if (slot.time === time) {
         const newParticipants = { ...slot.participants };
@@ -105,7 +116,6 @@ const EventPage: React.FC = () => {
     const updatedEventData = { ...eventData, timeSlots: newTimeSlots };
     setEventData(updatedEventData);
 
-    // 3. **設定儲存防抖** (不變)
     if (debounceSaveTimerRef.current) {
       clearTimeout(debounceSaveTimerRef.current);
     }
@@ -119,16 +129,14 @@ const EventPage: React.FC = () => {
         });
       } catch (error) {
         console.error("儲存事件資料失敗:", error);
-        // 如果儲存失敗，最好立即重新獲取一次伺服器狀態，以還原 UI
-        fetchEventData(); 
       }
     }, 1000);
   };
   
-  // **修改**: 確認事件時，停止輪詢
+  // **修改**: 確認事件時，停止長輪詢
   const updateEventDataOnFinalize = async (newEventData: EventData) => {
-    // 停止所有計時器，因為事件已經結束，不再需要同步
-    if (pollingTimerRef.current) clearInterval(pollingTimerRef.current);
+    // 停止輪詢
+    isPollingActive.current = false;
     if (debounceSaveTimerRef.current) clearTimeout(debounceSaveTimerRef.current);
 
     setEventData(newEventData);
@@ -197,7 +205,7 @@ const EventPage: React.FC = () => {
     return `每週 ${days[dayIndex]} ${timeString}`;
   }
 
-
+  // ... (下方的 JSX 渲染邏輯保持不變)
   if (isExpired) {
     return (
       <div className="min-h-screen flex flex-col items-center justify-center text-center p-4">
